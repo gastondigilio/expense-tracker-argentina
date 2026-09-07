@@ -47,7 +47,7 @@ export const Route = createFileRoute("/")({
   component: GastosPage,
 });
 
-type Motivo = "materiales" | "mano_de_obra" | "pago";
+type Motivo = "materiales" | "mano_de_obra" | "pago" | "recoleccion";
 
 type Expense = {
   id: string;
@@ -63,18 +63,20 @@ const MOTIVO_OPTIONS: { value: Motivo; label: string }[] = [
   { value: "materiales", label: "Materiales" },
   { value: "mano_de_obra", label: "Mano de obra" },
   { value: "pago", label: "Pago" },
+  { value: "recoleccion", label: "Recolección" },
 ];
 
 const MOTIVO_LABELS: Record<Motivo, string> = {
   materiales: "Materiales",
   mano_de_obra: "Mano de obra",
   pago: "Pago",
+  recoleccion: "Recolección",
 };
 
 const STORAGE_KEY = "gastos.v1";
 
 function normalizeMotivo(value: unknown): Motivo {
-  if (value === "mano_de_obra" || value === "pago") return value;
+  if (value === "mano_de_obra" || value === "pago" || value === "recoleccion") return value;
   return "materiales";
 }
 
