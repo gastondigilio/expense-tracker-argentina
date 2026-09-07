@@ -1,5 +1,21 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useMemo, useState } from "react";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+
+const selectTriggerClass =
+  "h-auto w-full rounded-lg border border-border bg-input/60 px-3 py-2.5 text-sm text-foreground shadow-none outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/30 focus:ring-offset-0 data-[placeholder]:text-muted-foreground/60";
+
+const selectContentClass =
+  "rounded-lg border border-border bg-input text-foreground shadow-lg";
+
+const selectItemClass =
+  "cursor-pointer rounded-md py-2 focus:bg-muted focus:text-foreground";
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -31,23 +47,44 @@ export const Route = createFileRoute("/")({
   component: GastosPage,
 });
 
+type Motivo = "materiales" | "mano_de_obra" | "pago";
+
 type Expense = {
   id: string;
   date: string; // YYYY-MM-DD
   description: string;
+  motivo: Motivo;
   amountArs: number;
   usdRate?: number; // ARS per USD (blue venta)
   rateStatus: "pending" | "ok" | "error";
 };
 
+const MOTIVO_OPTIONS: { value: Motivo; label: string }[] = [
+  { value: "materiales", label: "Materiales" },
+  { value: "mano_de_obra", label: "Mano de obra" },
+  { value: "pago", label: "Pago" },
+];
+
+const MOTIVO_LABELS: Record<Motivo, string> = {
+  materiales: "Materiales",
+  mano_de_obra: "Mano de obra",
+  pago: "Pago",
+};
+
 const STORAGE_KEY = "gastos.v1";
+
+function normalizeMotivo(value: unknown): Motivo {
+  if (value === "mano_de_obra" || value === "pago") return value;
+  return "materiales";
+}
 
 function loadExpenses(): Expense[] {
   if (typeof window === "undefined") return [];
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return [];
-    return JSON.parse(raw) as Expense[];
+    const list = JSON.parse(raw) as Expense[];
+    return list.map((e) => ({ ...e, motivo: normalizeMotivo(e.motivo) }));
   } catch {
     return [];
   }
@@ -110,11 +147,18 @@ function formatDate(iso: string) {
   return dt.toLocaleDateString("es-AR", { day: "2-digit", month: "short", year: "numeric" });
 }
 
+const PAGE_SIZE = 15;
+
 function GastosPage() {
   const [expenses, setExpenses] = useState<Expense[]>([]);
   const [date, setDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [description, setDescription] = useState("");
+  const [motivo, setMotivo] = useState<Motivo>("materiales");
   const [amount, setAmount] = useState("");
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [filterGasto, setFilterGasto] = useState("");
+  const [filterMotivo, setFilterMotivo] = useState<"all" | Motivo>("all");
+  const [page, setPage] = useState(1);
   const [loaded, setLoaded] = useState(false);
 
   useEffect(() => {
@@ -155,36 +199,117 @@ function GastosPage() {
     [expenses],
   );
 
+  const filtered = useMemo(() => {
+    const query = filterGasto.trim().toLowerCase();
+    return sorted.filter((e) => {
+      const matchesGasto = !query || e.description.toLowerCase().includes(query);
+      const matchesMotivo =
+        filterMotivo === "all" || normalizeMotivo(e.motivo) === filterMotivo;
+      return matchesGasto && matchesMotivo;
+    });
+  }, [sorted, filterGasto, filterMotivo]);
+
+  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const currentPage = Math.min(page, totalPages);
+
+  const paginated = useMemo(() => {
+    const start = (currentPage - 1) * PAGE_SIZE;
+    return filtered.slice(start, start + PAGE_SIZE);
+  }, [filtered, currentPage]);
+
+  useEffect(() => {
+    setPage(1);
+  }, [filterGasto, filterMotivo]);
+
+  useEffect(() => {
+    if (page > totalPages) setPage(totalPages);
+  }, [page, totalPages]);
+
+  const hasActiveFilter = Boolean(filterGasto.trim()) || filterMotivo !== "all";
+
   const totals = useMemo(() => {
     let ars = 0;
     let usd = 0;
     let usdMissing = false;
-    for (const e of expenses) {
+    for (const e of filtered) {
       ars += e.amountArs;
       if (e.usdRate) usd += e.amountArs / e.usdRate;
       else usdMissing = true;
     }
-    return { ars, usd, usdMissing, count: expenses.length };
-  }, [expenses]);
+    return { ars, usd, usdMissing, count: filtered.length };
+  }, [filtered]);
 
-  function addExpense(e: React.FormEvent) {
+  const totalsLabel = useMemo(() => {
+    if (filterMotivo !== "all" && filterGasto.trim()) {
+      return `${MOTIVO_LABELS[filterMotivo]} · “${filterGasto.trim()}”`;
+    }
+    if (filterMotivo !== "all") return MOTIVO_LABELS[filterMotivo];
+    if (filterGasto.trim()) return `“${filterGasto.trim()}”`;
+    return null;
+  }, [filterGasto, filterMotivo]);
+
+  function resetForm() {
+    setDescription("");
+    setMotivo("materiales");
+    setAmount("");
+    setEditingId(null);
+    setDate(new Date().toISOString().slice(0, 10));
+  }
+
+  function startEdit(expense: Expense) {
+    setEditingId(expense.id);
+    setDate(expense.date);
+    setDescription(expense.description);
+    setMotivo(normalizeMotivo(expense.motivo));
+    setAmount(String(expense.amountArs));
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  function saveExpense(e: React.FormEvent) {
     e.preventDefault();
     const amountNum = Number(amount.replace(",", "."));
     if (!description.trim() || !amountNum || amountNum <= 0 || !date) return;
+
+    const trimmedDescription = description.trim().slice(0, 120);
+
+    if (editingId) {
+      setExpenses((prev) =>
+        prev.map((exp) => {
+          if (exp.id !== editingId) return exp;
+          const dateChanged = exp.date !== date;
+          return {
+            ...exp,
+            date,
+            description: trimmedDescription,
+            motivo,
+            amountArs: amountNum,
+            ...(dateChanged
+              ? { usdRate: undefined, rateStatus: "pending" as const }
+              : {}),
+          };
+        }),
+      );
+      resetForm();
+      return;
+    }
+
     const newExp: Expense = {
       id: crypto.randomUUID(),
       date,
-      description: description.trim().slice(0, 120),
+      description: trimmedDescription,
+      motivo,
       amountArs: amountNum,
       rateStatus: "pending",
     };
     setExpenses((prev) => [newExp, ...prev]);
     setDescription("");
+    setMotivo("materiales");
     setAmount("");
   }
 
   function removeExpense(id: string) {
     setExpenses((prev) => prev.filter((e) => e.id !== id));
+    if (editingId === id) resetForm();
   }
 
   function retryRate(id: string) {
@@ -210,21 +335,37 @@ function GastosPage() {
 
         {/* Summary cards */}
         <section className="mb-8 grid grid-cols-1 gap-4 sm:grid-cols-3">
-          <SummaryCard label="Total en pesos" value={formatArs(totals.ars)} accent="primary" />
           <SummaryCard
-            label="Total en dólares"
+            label={hasActiveFilter ? "Total filtrado (ARS)" : "Total en pesos"}
+            value={formatArs(totals.ars)}
+            hint={totalsLabel ?? undefined}
+            accent="primary"
+          />
+          <SummaryCard
+            label={hasActiveFilter ? "Total filtrado (USD)" : "Total en dólares"}
             value={formatUsd(totals.usd)}
-            hint={totals.usdMissing ? "Algunas cotizaciones aún no cargaron" : undefined}
+            hint={
+              totals.usdMissing
+                ? "Algunas cotizaciones aún no cargaron"
+                : (totalsLabel ?? undefined)
+            }
             accent="accent"
           />
-          <SummaryCard label="Movimientos" value={String(totals.count)} accent="muted" />
+          <SummaryCard
+            label={hasActiveFilter ? "Movimientos filtrados" : "Movimientos"}
+            value={String(totals.count)}
+            hint={hasActiveFilter ? `de ${expenses.length} totales` : undefined}
+            accent="muted"
+          />
         </section>
 
         {/* Form */}
         <section className="glass-card mb-8 rounded-2xl p-5 sm:p-6">
-          <h2 className="mb-4 text-lg font-semibold">Cargar gasto</h2>
-          <form onSubmit={addExpense} className="grid grid-cols-1 gap-3 sm:grid-cols-12">
-            <div className="sm:col-span-3">
+          <h2 className="mb-4 text-lg font-semibold">
+            {editingId ? "Editar gasto" : "Cargar gasto"}
+          </h2>
+          <form onSubmit={saveExpense} className="grid grid-cols-1 gap-3 sm:grid-cols-12">
+            <div className="sm:col-span-2">
               <label className="mb-1.5 block text-xs font-medium text-muted-foreground">Día</label>
               <input
                 type="date"
@@ -235,17 +376,32 @@ function GastosPage() {
                 className="w-full rounded-lg border border-border bg-input/60 px-3 py-2.5 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/30"
               />
             </div>
-            <div className="sm:col-span-5">
+            <div className="sm:col-span-3">
               <label className="mb-1.5 block text-xs font-medium text-muted-foreground">Gasto</label>
               <input
                 type="text"
                 value={description}
                 onChange={(e) => setDescription(e.target.value)}
-                placeholder="Ej: Supermercado, alquiler, Netflix…"
+                placeholder="Ej: Cemento, plomero…"
                 maxLength={120}
                 required
                 className="w-full rounded-lg border border-border bg-input/60 px-3 py-2.5 text-sm text-foreground outline-none transition placeholder:text-muted-foreground/60 focus:border-primary focus:ring-2 focus:ring-primary/30"
               />
+            </div>
+            <div className="sm:col-span-3">
+              <label className="mb-1.5 block text-xs font-medium text-muted-foreground">Motivo</label>
+              <Select value={motivo} onValueChange={(value) => setMotivo(value as Motivo)}>
+                <SelectTrigger className={selectTriggerClass}>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent className={selectContentClass}>
+                  {MOTIVO_OPTIONS.map((opt) => (
+                    <SelectItem key={opt.value} value={opt.value} className={selectItemClass}>
+                      {opt.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
             <div className="sm:col-span-2">
               <label className="mb-1.5 block text-xs font-medium text-muted-foreground">Monto (ARS)</label>
@@ -261,9 +417,23 @@ function GastosPage() {
                 className="w-full rounded-lg border border-border bg-input/60 px-3 py-2.5 text-sm text-foreground outline-none transition placeholder:text-muted-foreground/60 focus:border-primary focus:ring-2 focus:ring-primary/30 font-mono"
               />
             </div>
-            <div className="sm:col-span-2 flex items-end">
-              <button type="submit" className="btn-primary w-full rounded-lg px-4 py-2.5 text-sm">
-                Agregar
+            <div
+              className={`flex items-end gap-2 ${editingId ? "sm:col-span-12 sm:justify-end" : "sm:col-span-2"}`}
+            >
+              {editingId && (
+                <button
+                  type="button"
+                  onClick={resetForm}
+                  className="rounded-lg border border-border px-4 py-2.5 text-sm text-muted-foreground transition hover:bg-muted hover:text-foreground"
+                >
+                  Cancelar
+                </button>
+              )}
+              <button
+                type="submit"
+                className={`btn-primary rounded-lg px-4 py-2.5 text-sm ${editingId ? "min-w-28" : "w-full"}`}
+              >
+                {editingId ? "Guardar" : "Agregar"}
               </button>
             </div>
           </form>
@@ -271,16 +441,76 @@ function GastosPage() {
 
         {/* Table */}
         <section className="glass-card overflow-hidden rounded-2xl">
-          <div className="flex items-center justify-between border-b border-border/60 px-5 py-4">
-            <h2 className="text-lg font-semibold">Historial</h2>
-            <span className="text-xs text-muted-foreground">
-              {expenses.length} {expenses.length === 1 ? "gasto" : "gastos"}
-            </span>
+          <div className="border-b border-border/60 px-5 py-4">
+            <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+              <div className="flex items-center justify-between gap-3 sm:justify-start">
+                <h2 className="text-lg font-semibold">Historial</h2>
+                <span className="text-xs text-muted-foreground">
+                  {filtered.length} de {expenses.length}{" "}
+                  {expenses.length === 1 ? "gasto" : "gastos"}
+                </span>
+              </div>
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:w-auto">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setFilterGasto("");
+                    setFilterMotivo("all");
+                  }}
+                  disabled={!hasActiveFilter}
+                  className="shrink-0 rounded-lg border border-border px-3 py-2 text-sm text-muted-foreground transition hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
+                  aria-label="Borrar filtros"
+                >
+                  Borrar filtros
+                </button>
+                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 sm:min-w-[28rem]">
+                  <div>
+                    <label className="mb-1 block text-xs font-medium text-muted-foreground">
+                      Filtrar por gasto
+                    </label>
+                    <input
+                      type="search"
+                      value={filterGasto}
+                      onChange={(e) => setFilterGasto(e.target.value)}
+                      placeholder="Buscar descripción…"
+                      className="w-full rounded-lg border border-border bg-input/60 px-3 py-2 text-sm text-foreground outline-none transition placeholder:text-muted-foreground/60 focus:border-primary focus:ring-2 focus:ring-primary/30"
+                    />
+                  </div>
+                  <div>
+                    <label className="mb-1 block text-xs font-medium text-muted-foreground">
+                      Filtrar por motivo
+                    </label>
+                    <Select
+                      value={filterMotivo}
+                      onValueChange={(value) => setFilterMotivo(value as "all" | Motivo)}
+                    >
+                      <SelectTrigger className={`${selectTriggerClass} py-2`}>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent className={selectContentClass}>
+                        <SelectItem value="all" className={selectItemClass}>
+                          Todos
+                        </SelectItem>
+                        {MOTIVO_OPTIONS.map((opt) => (
+                          <SelectItem key={opt.value} value={opt.value} className={selectItemClass}>
+                            {opt.label}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
 
-          {sorted.length === 0 ? (
+          {expenses.length === 0 ? (
             <div className="px-5 py-16 text-center text-sm text-muted-foreground">
               Todavía no cargaste ningún gasto. Empezá agregando uno arriba.
+            </div>
+          ) : filtered.length === 0 ? (
+            <div className="px-5 py-16 text-center text-sm text-muted-foreground">
+              No hay gastos que coincidan con el filtro.
             </div>
           ) : (
             <>
@@ -291,6 +521,7 @@ function GastosPage() {
                     <tr className="text-left text-xs uppercase tracking-wider text-muted-foreground">
                       <th className="px-5 py-3 font-medium">Día</th>
                       <th className="px-5 py-3 font-medium">Gasto</th>
+                      <th className="px-5 py-3 font-medium">Motivo</th>
                       <th className="px-5 py-3 font-medium text-right">Monto (ARS)</th>
                       <th className="px-5 py-3 font-medium text-right">Cotización</th>
                       <th className="px-5 py-3 font-medium text-right">USD</th>
@@ -298,12 +529,15 @@ function GastosPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {sorted.map((e) => (
+                    {paginated.map((e) => (
                       <tr key={e.id} className="row-hover border-t border-border/40">
                         <td className="px-5 py-3.5 whitespace-nowrap text-muted-foreground">
                           {formatDate(e.date)}
                         </td>
                         <td className="px-5 py-3.5 font-medium">{e.description}</td>
+                        <td className="px-5 py-3.5 text-muted-foreground">
+                          {MOTIVO_LABELS[normalizeMotivo(e.motivo)]}
+                        </td>
                         <td className="px-5 py-3.5 text-right font-mono">{formatArs(e.amountArs)}</td>
                         <td className="px-5 py-3.5 text-right font-mono text-xs text-muted-foreground">
                           {e.rateStatus === "ok" && e.usdRate
@@ -327,13 +561,22 @@ function GastosPage() {
                           )}
                         </td>
                         <td className="px-5 py-3.5 text-right">
-                          <button
-                            onClick={() => removeExpense(e.id)}
-                            className="rounded-md p-1.5 text-muted-foreground transition hover:bg-destructive/10 hover:text-destructive"
-                            aria-label="Eliminar"
-                          >
-                            <TrashIcon />
-                          </button>
+                          <div className="inline-flex items-center gap-0.5">
+                            <button
+                              onClick={() => startEdit(e)}
+                              className="rounded-md p-1.5 text-muted-foreground transition hover:bg-muted hover:text-foreground"
+                              aria-label="Editar"
+                            >
+                              <PencilIcon />
+                            </button>
+                            <button
+                              onClick={() => removeExpense(e.id)}
+                              className="rounded-md p-1.5 text-muted-foreground transition hover:bg-destructive/10 hover:text-destructive"
+                              aria-label="Eliminar"
+                            >
+                              <TrashIcon />
+                            </button>
+                          </div>
                         </td>
                       </tr>
                     ))}
@@ -343,20 +586,32 @@ function GastosPage() {
 
               {/* Mobile cards */}
               <ul className="sm:hidden divide-y divide-border/40">
-                {sorted.map((e) => (
+                {paginated.map((e) => (
                   <li key={e.id} className="px-4 py-4">
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0">
                         <div className="text-xs text-muted-foreground">{formatDate(e.date)}</div>
                         <div className="mt-0.5 truncate font-medium">{e.description}</div>
+                        <div className="mt-0.5 text-xs text-muted-foreground">
+                          {MOTIVO_LABELS[normalizeMotivo(e.motivo)]}
+                        </div>
                       </div>
-                      <button
-                        onClick={() => removeExpense(e.id)}
-                        className="shrink-0 rounded-md p-1.5 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
-                        aria-label="Eliminar"
-                      >
-                        <TrashIcon />
-                      </button>
+                      <div className="flex shrink-0 items-center gap-0.5">
+                        <button
+                          onClick={() => startEdit(e)}
+                          className="rounded-md p-1.5 text-muted-foreground hover:bg-muted hover:text-foreground"
+                          aria-label="Editar"
+                        >
+                          <PencilIcon />
+                        </button>
+                        <button
+                          onClick={() => removeExpense(e.id)}
+                          className="rounded-md p-1.5 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+                          aria-label="Eliminar"
+                        >
+                          <TrashIcon />
+                        </button>
+                      </div>
                     </div>
                     <div className="mt-2 flex items-baseline justify-between">
                       <span className="font-mono text-sm">{formatArs(e.amountArs)}</span>
@@ -375,6 +630,32 @@ function GastosPage() {
                   </li>
                 ))}
               </ul>
+
+              {totalPages > 1 && (
+                <div className="flex items-center justify-between gap-3 border-t border-border/60 px-5 py-3">
+                  <span className="text-xs text-muted-foreground">
+                    Página {currentPage} de {totalPages}
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setPage((p) => Math.max(1, p - 1))}
+                      disabled={currentPage <= 1}
+                      className="rounded-lg border border-border px-3 py-1.5 text-sm text-muted-foreground transition hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      Anterior
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                      disabled={currentPage >= totalPages}
+                      className="rounded-lg border border-border px-3 py-1.5 text-sm text-muted-foreground transition hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      Siguiente
+                    </button>
+                  </div>
+                </div>
+              )}
             </>
           )}
         </section>
@@ -413,6 +694,15 @@ function SummaryCard({
         {hint && <div className="mt-1 text-xs text-warning">{hint}</div>}
       </div>
     </div>
+  );
+}
+
+function PencilIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12 20h9" />
+      <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" />
+    </svg>
   );
 }
 
