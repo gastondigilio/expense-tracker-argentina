@@ -32,13 +32,13 @@ export const Route = createFileRoute("/")({
       {
         name: "description",
         content:
-          "Registrá tus gastos diarios en pesos y visualizá automáticamente su equivalente en dólares al valor del blue de ese día.",
+          "Registrá tus gastos diarios en pesos y visualizá automáticamente su equivalente en dólares al valor del MEP de ese día.",
       },
       { property: "og:title", content: "Gastos — Registro personal con conversión a USD" },
       {
         property: "og:description",
         content:
-          "Registrá tus gastos diarios en pesos y visualizá automáticamente su equivalente en dólares al valor del blue de ese día.",
+          "Registrá tus gastos diarios en pesos y visualizá automáticamente su equivalente en dólares al valor del MEP de ese día.",
       },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary_large_image" },
@@ -92,7 +92,7 @@ const rateCache = new Map<string, number>();
 function loadRateCache() {
   if (typeof window === "undefined") return;
   try {
-    const raw = localStorage.getItem("gastos.rates");
+    const raw = localStorage.getItem("gastos.rates.mep");
     if (!raw) return;
     const obj = JSON.parse(raw) as Record<string, number>;
     Object.entries(obj).forEach(([k, v]) => rateCache.set(k, v));
@@ -101,19 +101,19 @@ function loadRateCache() {
 function persistRateCache() {
   const obj: Record<string, number> = {};
   rateCache.forEach((v, k) => (obj[k] = v));
-  localStorage.setItem("gastos.rates", JSON.stringify(obj));
+  localStorage.setItem("gastos.rates.mep", JSON.stringify(obj));
 }
 
-async function fetchBlueRate(date: string): Promise<number | null> {
+async function fetchMepRate(date: string): Promise<number | null> {
   if (rateCache.has(date)) return rateCache.get(date)!;
   const [y, m, d] = date.split("-");
   const today = new Date().toISOString().slice(0, 10);
   try {
     let url: string;
     if (date >= today) {
-      url = "https://dolarapi.com/v1/dolares/blue";
+      url = "https://dolarapi.com/v1/dolares/bolsa";
     } else {
-      url = `https://api.argentinadatos.com/v1/cotizaciones/dolares/blue/${y}/${m}/${d}`;
+      url = `https://api.argentinadatos.com/v1/cotizaciones/dolares/bolsa/${y}/${m}/${d}`;
     }
     const res = await fetch(url);
     if (!res.ok) return null;
@@ -205,7 +205,7 @@ function GastosPage() {
     let cancelled = false;
     (async () => {
       for (const exp of pending) {
-        const rate = await fetchBlueRate(exp.date);
+        const rate = await fetchMepRate(exp.date);
         if (cancelled) return;
         const rateStatus = rate ? "ok" : "error";
         const { error: updateError } = await supabase
@@ -383,13 +383,13 @@ function GastosPage() {
         <header className="mb-10 sm:mb-14">
           <div className="mb-3 inline-flex items-center gap-2 rounded-full border border-border bg-surface/60 px-3 py-1 text-xs font-medium text-muted-foreground backdrop-blur">
             <span className="h-1.5 w-1.5 rounded-full bg-success animate-pulse" />
-            Cotización blue en tiempo real · Argentina
+            Cotización MEP en tiempo real · Argentina
           </div>
           <h1 className="text-4xl sm:text-5xl font-bold tracking-tight">
             Mis <span className="text-gradient">gastos</span>
           </h1>
           <p className="mt-3 max-w-xl text-muted-foreground">
-            Registrá cada gasto en pesos y automáticamente calculamos su equivalente en dólares al valor del blue de ese día.
+            Registrá cada gasto en pesos y automáticamente calculamos su equivalente en dólares al valor del MEP de ese día.
           </p>
         </header>
 
@@ -727,7 +727,7 @@ function GastosPage() {
         </section>
 
         <p className="mt-6 text-center text-xs text-muted-foreground">
-          Cotizaciones del dólar blue vía dolarapi.com y argentinadatos.com. Los gastos se guardan en tu base de Supabase.
+          Cotizaciones del dólar MEP (bolsa) vía dolarapi.com y argentinadatos.com. Los gastos se guardan en tu base de Supabase.
         </p>
       </div>
     </main>
