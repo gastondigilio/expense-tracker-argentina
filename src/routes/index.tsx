@@ -7,6 +7,14 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import {
+  fromDb,
+  isMotivo,
+  supabase,
+  toDb,
+  type Expense,
+  type Motivo,
+} from "@/lib/supabase";
 
 const selectTriggerClass =
   "h-auto w-full rounded-lg border border-border bg-input/60 px-3 py-2.5 text-sm text-foreground shadow-none outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/30 focus:ring-offset-0 data-[placeholder]:text-muted-foreground/60";
@@ -47,18 +55,6 @@ export const Route = createFileRoute("/")({
   component: GastosPage,
 });
 
-type Motivo = "materiales" | "mano_de_obra" | "pago" | "recoleccion";
-
-type Expense = {
-  id: string;
-  date: string; // YYYY-MM-DD
-  description: string;
-  motivo: Motivo;
-  amountArs: number;
-  usdRate?: number; // ARS per USD (blue venta)
-  rateStatus: "pending" | "ok" | "error";
-};
-
 const MOTIVO_OPTIONS: { value: Motivo; label: string }[] = [
   { value: "materiales", label: "Materiales" },
   { value: "mano_de_obra", label: "Mano de obra" },
@@ -76,11 +72,10 @@ const MOTIVO_LABELS: Record<Motivo, string> = {
 const STORAGE_KEY = "gastos.v1";
 
 function normalizeMotivo(value: unknown): Motivo {
-  if (value === "mano_de_obra" || value === "pago" || value === "recoleccion") return value;
-  return "materiales";
+  return isMotivo(value) ? value : "materiales";
 }
 
-function loadExpenses(): Expense[] {
+function loadLocalExpenses(): Expense[] {
   if (typeof window === "undefined") return [];
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
@@ -90,10 +85,6 @@ function loadExpenses(): Expense[] {
   } catch {
     return [];
   }
-}
-
-function saveExpenses(list: Expense[]) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(list));
 }
 
 // Cache rates in memory + localStorage to avoid re-fetching
@@ -162,19 +153,53 @@ function GastosPage() {
   const [filterMotivo, setFilterMotivo] = useState<"all" | Motivo>("all");
   const [page, setPage] = useState(1);
   const [loaded, setLoaded] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     loadRateCache();
-    setExpenses(loadExpenses());
-    setLoaded(true);
-  }, []);
+    let cancelled = false;
+    (async () => {
+      const { data, error: loadError } = await supabase
+        .from("expenses")
+        .select("*")
+        .order("date", { ascending: false })
+        .order("created_at", { ascending: false });
 
-  useEffect(() => {
-    if (loaded) saveExpenses(expenses);
-  }, [expenses, loaded]);
+      if (cancelled) return;
+
+      if (loadError) {
+        setError("No se pudieron cargar los gastos desde la base.");
+        setLoaded(true);
+        return;
+      }
+
+      let list = (data ?? []).map(fromDb);
+
+      if (list.length === 0) {
+        const local = loadLocalExpenses();
+        if (local.length > 0) {
+          const { error: migrateError } = await supabase.from("expenses").insert(local.map(toDb));
+          if (!migrateError) {
+            list = local;
+            localStorage.removeItem(STORAGE_KEY);
+          }
+        }
+      }
+
+      if (cancelled) return;
+      setExpenses(list);
+      setLoaded(true);
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Resolve pending rates
   useEffect(() => {
+    if (!loaded) return;
     const pending = expenses.filter((e) => e.rateStatus === "pending");
     if (pending.length === 0) return;
     let cancelled = false;
@@ -182,11 +207,15 @@ function GastosPage() {
       for (const exp of pending) {
         const rate = await fetchBlueRate(exp.date);
         if (cancelled) return;
+        const rateStatus = rate ? "ok" : "error";
+        const { error: updateError } = await supabase
+          .from("expenses")
+          .update({ usd_rate: rate, rate_status: rateStatus })
+          .eq("id", exp.id);
+        if (cancelled || updateError) return;
         setExpenses((prev) =>
           prev.map((e) =>
-            e.id === exp.id
-              ? { ...e, usdRate: rate ?? undefined, rateStatus: rate ? "ok" : "error" }
-              : e,
+            e.id === exp.id ? { ...e, usdRate: rate ?? undefined, rateStatus } : e,
           ),
         );
       }
@@ -194,7 +223,7 @@ function GastosPage() {
     return () => {
       cancelled = true;
     };
-  }, [expenses]);
+  }, [expenses, loaded]);
 
   const sorted = useMemo(
     () => [...expenses].sort((a, b) => (a.date < b.date ? 1 : -1)),
@@ -267,55 +296,84 @@ function GastosPage() {
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
-  function saveExpense(e: React.FormEvent) {
+  async function saveExpense(e: React.FormEvent) {
     e.preventDefault();
     const amountNum = Number(amount.replace(",", "."));
-    if (!description.trim() || !amountNum || amountNum <= 0 || !date) return;
+    if (!description.trim() || !amountNum || amountNum <= 0 || !date || saving) return;
 
     const trimmedDescription = description.trim().slice(0, 120);
+    setSaving(true);
+    setError(null);
 
-    if (editingId) {
-      setExpenses((prev) =>
-        prev.map((exp) => {
-          if (exp.id !== editingId) return exp;
-          const dateChanged = exp.date !== date;
-          return {
-            ...exp,
-            date,
-            description: trimmedDescription,
-            motivo,
-            amountArs: amountNum,
-            ...(dateChanged
-              ? { usdRate: undefined, rateStatus: "pending" as const }
-              : {}),
-          };
-        }),
-      );
-      resetForm();
-      return;
+    try {
+      if (editingId) {
+        const current = expenses.find((exp) => exp.id === editingId);
+        if (!current) return;
+        const dateChanged = current.date !== date;
+        const payload = {
+          date,
+          description: trimmedDescription,
+          motivo,
+          amount_ars: amountNum,
+          ...(dateChanged ? { usd_rate: null, rate_status: "pending" as const } : {}),
+        };
+        const { data, error: updateError } = await supabase
+          .from("expenses")
+          .update(payload)
+          .eq("id", editingId)
+          .select()
+          .single();
+        if (updateError) throw updateError;
+        setExpenses((prev) => prev.map((exp) => (exp.id === editingId ? fromDb(data) : exp)));
+        resetForm();
+        return;
+      }
+
+      const { data, error: insertError } = await supabase
+        .from("expenses")
+        .insert({
+          date,
+          description: trimmedDescription,
+          motivo,
+          amount_ars: amountNum,
+          rate_status: "pending",
+        })
+        .select()
+        .single();
+      if (insertError) throw insertError;
+      setExpenses((prev) => [fromDb(data), ...prev]);
+      setDescription("");
+      setMotivo("materiales");
+      setAmount("");
+    } catch {
+      setError("No se pudo guardar el gasto en la base.");
+    } finally {
+      setSaving(false);
     }
-
-    const newExp: Expense = {
-      id: crypto.randomUUID(),
-      date,
-      description: trimmedDescription,
-      motivo,
-      amountArs: amountNum,
-      rateStatus: "pending",
-    };
-    setExpenses((prev) => [newExp, ...prev]);
-    setDescription("");
-    setMotivo("materiales");
-    setAmount("");
   }
 
-  function removeExpense(id: string) {
+  async function removeExpense(id: string) {
+    const { error: deleteError } = await supabase.from("expenses").delete().eq("id", id);
+    if (deleteError) {
+      setError("No se pudo eliminar el gasto.");
+      return;
+    }
     setExpenses((prev) => prev.filter((e) => e.id !== id));
     if (editingId === id) resetForm();
   }
 
-  function retryRate(id: string) {
-    setExpenses((prev) => prev.map((e) => (e.id === id ? { ...e, rateStatus: "pending" } : e)));
+  async function retryRate(id: string) {
+    const { error: updateError } = await supabase
+      .from("expenses")
+      .update({ rate_status: "pending", usd_rate: null })
+      .eq("id", id);
+    if (updateError) {
+      setError("No se pudo reintentar la cotización.");
+      return;
+    }
+    setExpenses((prev) =>
+      prev.map((e) => (e.id === id ? { ...e, rateStatus: "pending", usdRate: undefined } : e)),
+    );
   }
 
   return (
@@ -366,6 +424,11 @@ function GastosPage() {
           <h2 className="mb-4 text-lg font-semibold">
             {editingId ? "Editar gasto" : "Cargar gasto"}
           </h2>
+          {error && (
+            <p className="mb-4 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+              {error}
+            </p>
+          )}
           <form onSubmit={saveExpense} className="grid grid-cols-1 gap-3 sm:grid-cols-12">
             <div className="sm:col-span-2">
               <label className="mb-1.5 block text-xs font-medium text-muted-foreground">Día</label>
@@ -433,9 +496,10 @@ function GastosPage() {
               )}
               <button
                 type="submit"
-                className={`btn-primary rounded-lg px-4 py-2.5 text-sm ${editingId ? "min-w-28" : "w-full"}`}
+                disabled={saving || !loaded}
+                className={`btn-primary rounded-lg px-4 py-2.5 text-sm ${editingId ? "min-w-28" : "w-full"} disabled:opacity-60`}
               >
-                {editingId ? "Guardar" : "Agregar"}
+                {saving ? "Guardando…" : editingId ? "Guardar" : "Agregar"}
               </button>
             </div>
           </form>
@@ -663,7 +727,7 @@ function GastosPage() {
         </section>
 
         <p className="mt-6 text-center text-xs text-muted-foreground">
-          Cotizaciones del dólar blue vía dolarapi.com y argentinadatos.com. Datos guardados localmente en tu navegador.
+          Cotizaciones del dólar blue vía dolarapi.com y argentinadatos.com. Los gastos se guardan en tu base de Supabase.
         </p>
       </div>
     </main>

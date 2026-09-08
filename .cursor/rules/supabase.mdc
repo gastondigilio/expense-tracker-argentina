@@ -1,0 +1,11 @@
+---
+description: Aislamiento de Supabase para gastos-app
+alwaysApply: true
+---
+
+# Supabase — solo gastos-app
+
+- **Único project_ref permitido en este repo:** `jogegcoesopmgluhxojt`
+- **MCP permitido:** `supabase-gastos`
+- **Prohibido:** usar MCP de MaldaGim (`bihqdptdkgdfztufrmlm`) o ERP (`muuttmpamwhuyqwjfzexs`)
+- Antes de SQL, migraciones o keys: confirmar que la URL sea `https://jogegcoesopmgluhxojt.supabase.co`
