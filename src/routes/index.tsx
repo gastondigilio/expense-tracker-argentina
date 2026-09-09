@@ -7,6 +7,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { downloadFilteredExpensesExcel } from "@/lib/export-excel";
 import {
   fromDb,
   isMotivo,
@@ -32,13 +33,13 @@ export const Route = createFileRoute("/")({
       {
         name: "description",
         content:
-          "Registrá tus gastos diarios en pesos y visualizá automáticamente su equivalente en dólares al valor del MEP de ese día.",
+          "Registrá tus gastos diarios en pesos y visualizá automáticamente su equivalente en dólares al valor del Banco Nación de ese día.",
       },
       { property: "og:title", content: "Gastos — Registro personal con conversión a USD" },
       {
         property: "og:description",
         content:
-          "Registrá tus gastos diarios en pesos y visualizá automáticamente su equivalente en dólares al valor del MEP de ese día.",
+          "Registrá tus gastos diarios en pesos y visualizá automáticamente su equivalente en dólares al valor del Banco Nación de ese día.",
       },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary_large_image" },
@@ -92,7 +93,7 @@ const rateCache = new Map<string, number>();
 function loadRateCache() {
   if (typeof window === "undefined") return;
   try {
-    const raw = localStorage.getItem("gastos.rates.mep");
+    const raw = localStorage.getItem("gastos.rates.bna");
     if (!raw) return;
     const obj = JSON.parse(raw) as Record<string, number>;
     Object.entries(obj).forEach(([k, v]) => rateCache.set(k, v));
@@ -101,19 +102,19 @@ function loadRateCache() {
 function persistRateCache() {
   const obj: Record<string, number> = {};
   rateCache.forEach((v, k) => (obj[k] = v));
-  localStorage.setItem("gastos.rates.mep", JSON.stringify(obj));
+  localStorage.setItem("gastos.rates.bna", JSON.stringify(obj));
 }
 
-async function fetchMepRate(date: string): Promise<number | null> {
+async function fetchBnaRate(date: string): Promise<number | null> {
   if (rateCache.has(date)) return rateCache.get(date)!;
   const [y, m, d] = date.split("-");
   const today = new Date().toISOString().slice(0, 10);
   try {
     let url: string;
     if (date >= today) {
-      url = "https://dolarapi.com/v1/dolares/bolsa";
+      url = "https://dolarapi.com/v1/dolares/oficial";
     } else {
-      url = `https://api.argentinadatos.com/v1/cotizaciones/dolares/bolsa/${y}/${m}/${d}`;
+      url = `https://api.argentinadatos.com/v1/cotizaciones/dolares/oficial/${y}/${m}/${d}`;
     }
     const res = await fetch(url);
     if (!res.ok) return null;
@@ -205,7 +206,7 @@ function GastosPage() {
     let cancelled = false;
     (async () => {
       for (const exp of pending) {
-        const rate = await fetchMepRate(exp.date);
+        const rate = await fetchBnaRate(exp.date);
         if (cancelled) return;
         const rateStatus = rate ? "ok" : "error";
         const { error: updateError } = await supabase
@@ -368,7 +369,7 @@ function GastosPage() {
       .update({ rate_status: "pending", usd_rate: null })
       .eq("id", id);
     if (updateError) {
-      setError("No se pudo reintentar la cotización.");
+      setError("No se pudo reintentar el valor en dólares.");
       return;
     }
     setExpenses((prev) =>
@@ -381,15 +382,11 @@ function GastosPage() {
       <div className="mx-auto max-w-6xl px-4 py-10 sm:py-16">
         {/* Header */}
         <header className="mb-10 sm:mb-14">
-          <div className="mb-3 inline-flex items-center gap-2 rounded-full border border-border bg-surface/60 px-3 py-1 text-xs font-medium text-muted-foreground backdrop-blur">
-            <span className="h-1.5 w-1.5 rounded-full bg-success animate-pulse" />
-            Cotización MEP en tiempo real · Argentina
-          </div>
           <h1 className="text-4xl sm:text-5xl font-bold tracking-tight">
             Mis <span className="text-gradient">gastos</span>
           </h1>
           <p className="mt-3 max-w-xl text-muted-foreground">
-            Registrá cada gasto en pesos y automáticamente calculamos su equivalente en dólares al valor del MEP de ese día.
+            Registrá cada gasto en pesos y automáticamente calculamos su equivalente en dólares al valor del Banco Nación de ese día.
           </p>
         </header>
 
@@ -406,7 +403,7 @@ function GastosPage() {
             value={formatUsd(totals.usd)}
             hint={
               totals.usdMissing
-                ? "Algunas cotizaciones aún no cargaron"
+                ? "Algunos valores en dólares aún no cargaron"
                 : (totalsLabel ?? undefined)
             }
             accent="accent"
@@ -517,6 +514,18 @@ function GastosPage() {
                 </span>
               </div>
               <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:w-auto">
+                <button
+                  type="button"
+                  onClick={() => {
+                    void downloadFilteredExpensesExcel(filtered, totalsLabel).catch(() => {
+                      setError("No se pudo descargar el Excel.");
+                    });
+                  }}
+                  disabled={filtered.length === 0}
+                  className="shrink-0 rounded-lg border border-border bg-primary/15 px-3 py-2 text-sm font-medium text-foreground transition hover:bg-primary/25 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  Descargar
+                </button>
                 <button
                   type="button"
                   onClick={() => {
@@ -725,10 +734,6 @@ function GastosPage() {
             </>
           )}
         </section>
-
-        <p className="mt-6 text-center text-xs text-muted-foreground">
-          Cotizaciones del dólar MEP (bolsa) vía dolarapi.com y argentinadatos.com. Los gastos se guardan en tu base de Supabase.
-        </p>
       </div>
     </main>
   );
